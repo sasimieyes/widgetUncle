@@ -291,8 +291,8 @@ function Get-LevelColor {
     param([int]$Percent, $Pal)
     if ($script:Settings.IconColorMode -eq 'gray') {
         if ($Percent -le 10) { return [System.Drawing.Color]::FromArgb(0, 0, 0) }
-        if ($Percent -le 20) { return [System.Drawing.Color]::FromArgb(75, 75, 75) }
-        return [System.Drawing.Color]::FromArgb(150, 150, 150)
+        if ($Percent -le 20) { return [System.Drawing.Color]::FromArgb(48, 48, 48) }
+        return [System.Drawing.Color]::FromArgb(95, 95, 95)
     }
     if ($Percent -le 10) { return (ConvertTo-ColorSafe $script:Settings.CritColor $Pal.Crit) }
     if ($Percent -le 20) { return (ConvertTo-ColorSafe $script:Settings.WarnColor $Pal.Warn) }
