@@ -83,7 +83,7 @@ $script:UI = @{
 $script:Settings = @{
     RefreshSec     = 60
     BarOffsetRight = 0           # 알림 영역 왼쪽 기준점에서 왼쪽으로 띄울 거리(px)
-    DisplayMode    = 'icon'      # 'number' | 'icon'
+    DisplayMode    = 'icon'      # 'number' | 'icon' | 'iconNumber'
     HiddenDevices  = @()
     ConnectedOnly  = $true       # 현재 연결된 장치만 표시
     Aliases        = @{}         # 원본 장치명 -> 표시 이름
@@ -97,7 +97,7 @@ function Read-Settings {
         $j = Get-Content $script:SettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($j.RefreshSec -ge 10) { $script:Settings.RefreshSec = [int]$j.RefreshSec }
         if ($null -ne $j.BarOffsetRight -and $j.BarOffsetRight -ge 0) { $script:Settings.BarOffsetRight = [int]$j.BarOffsetRight }
-        if ($j.DisplayMode -eq 'icon' -or $j.DisplayMode -eq 'number') { $script:Settings.DisplayMode = [string]$j.DisplayMode }
+        if ($j.DisplayMode -eq 'icon' -or $j.DisplayMode -eq 'number' -or $j.DisplayMode -eq 'iconNumber') { $script:Settings.DisplayMode = [string]$j.DisplayMode }
         if ($null -ne $j.HiddenDevices) { $script:Settings.HiddenDevices = @($j.HiddenDevices | ForEach-Object { [string]$_ }) }
         if ($null -ne $j.ConnectedOnly) { $script:Settings.ConnectedOnly = [bool]$j.ConnectedOnly }
         if ($null -ne $j.Aliases) {
@@ -286,22 +286,26 @@ function Get-LevelColor {
 # ------------------------------------------------------------ 배터리 아이콘 렌더링
 # 가로형 배터리: 테두리 + 오른쪽 양극 캡 + 잔량만큼 채움
 function New-BatteryImage {
-    param([int]$Percent, $Pal, [int]$W, [int]$H)
+    param([int]$Percent, $Pal, [int]$W, [int]$H, [switch]$ShowPercent)
     $bmp = New-Object System.Drawing.Bitmap($W, $H, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb))
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     try {
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
         $g.Clear([System.Drawing.Color]::Transparent)
 
         $levelColor = Get-LevelColor -Percent $Percent -Pal $Pal
-        $penW   = [Math]::Max(1.5, $H * 0.085)
-        $capW   = [Math]::Max(2.0, $W * 0.075)
-        $radius = [Math]::Max(2.0, $H * 0.18)
+        $penW   = [Math]::Max(1.5, [Math]::Round($H * 0.09, 1))
+        $capW   = [Math]::Max(2.0, [Math]::Round($W * 0.07, 1))
+        $capGap = [Math]::Max(1.0, [Math]::Round($penW * 0.45, 1))
+        $radius = [Math]::Max(2.5, [Math]::Round($H * 0.19, 1))
 
+        $bodyW = $W - $capW - $capGap - $penW
+        $bodyH = $H - $penW
         $bx = $penW / 2
-        $by = $penW / 2
-        $bw = $W - $capW - $penW - 1
-        $bh = $H - $penW - 1
+        $by = ($H - $bodyH) / 2
+        $bw = $bodyW
+        $bh = $bodyH
 
         # 본체 외곽 (둥근 사각형)
         $path = New-Object System.Drawing.Drawing2D.GraphicsPath
@@ -315,23 +319,28 @@ function New-BatteryImage {
         $g.DrawPath($pen, $path)
 
         # 양극 캡
-        $capH = $bh * 0.45
+        $capH = $bh * 0.46
         $capBrush = New-Object System.Drawing.SolidBrush($Pal.Name)
-        $capRect = New-Object System.Drawing.RectangleF([float]($bx + $bw + $penW / 2), [float]($by + ($bh - $capH) / 2), [float]$capW, [float]$capH)
+        $capRect = New-Object System.Drawing.RectangleF([float]($bx + $bw + $capGap), [float]($by + ($bh - $capH) / 2), [float]$capW, [float]$capH)
         $g.FillRectangle($capBrush, $capRect)
 
         # 잔량 채움
-        $inset = $penW + [Math]::Max(1.5, $H * 0.07)
-        $fullW = $bw - $inset * 2 + 1
-        $fillW = [float]($fullW * $Percent / 100.0)
-        if ($Percent -gt 0 -and $fillW -lt 2) { $fillW = 2 }
+        $innerGap = [Math]::Max(2.0, [Math]::Round($H * 0.12, 1))
+        $ix = $bx + ($penW / 2) + $innerGap
+        $iy = $by + ($penW / 2) + $innerGap
+        $iw = $bw - $penW - ($innerGap * 2)
+        $ih = $bh - $penW - ($innerGap * 2)
+        if ($iw -lt 1) { $iw = 1 }
+        if ($ih -lt 1) { $ih = 1 }
+        $fillW = [float]($iw * $Percent / 100.0)
+        if ($Percent -gt 0 -and $fillW -lt [Math]::Min(2.0, $iw)) { $fillW = [Math]::Min(2.0, $iw) }
         if ($fillW -gt 0) {
             $fillBrush = New-Object System.Drawing.SolidBrush($levelColor)
-            $fr = [Math]::Max(1.0, $radius - $inset / 2)
+            $fr = [Math]::Max(1.0, $ih / 2)
             $fd = $fr * 2
-            $fx = $bx + $inset
-            $fy = $by + $inset
-            $fh = $bh - $inset * 2 + 1
+            $fx = $ix
+            $fy = $iy
+            $fh = $ih
             if ($fillW -le $fd) {
                 $g.FillEllipse($fillBrush, [float]$fx, [float]$fy, [float][Math]::Max(2, $fillW), [float]$fh)
             } else {
@@ -345,6 +354,23 @@ function New-BatteryImage {
                 $fpath.Dispose()
             }
             $fillBrush.Dispose()
+        }
+
+        if ($ShowPercent) {
+            $textColor = $Pal.Normal
+            if ($Percent -gt 20) {
+                $lum = 0.299 * $levelColor.R + 0.587 * $levelColor.G + 0.114 * $levelColor.B
+                $textColor = if ($lum -gt 150) { [System.Drawing.Color]::FromArgb(25, 25, 25) } else { [System.Drawing.Color]::White }
+            }
+            $fontSize = [Math]::Max(8, [int]($H * 0.50))
+            $font = New-Object System.Drawing.Font('Segoe UI', $fontSize, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+            $textBrush = New-Object System.Drawing.SolidBrush($textColor)
+            $fmt = New-Object System.Drawing.StringFormat
+            $fmt.Alignment = [System.Drawing.StringAlignment]::Center
+            $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
+            $textRect = New-Object System.Drawing.RectangleF([float]$bx, [float]($by - 0.5), [float]$bw, [float]$bh)
+            $g.DrawString([string]$Percent, $font, $textBrush, $textRect, $fmt)
+            $fmt.Dispose(); $textBrush.Dispose(); $font.Dispose()
         }
 
         $pen.Dispose(); $path.Dispose(); $capBrush.Dispose()
@@ -530,9 +556,11 @@ function Build-Labels {
     $valSize  = [Math]::Max(10, [int]($barH * 0.40))
     $nameFont = New-Object System.Drawing.Font('Segoe UI', $nameSize, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
     $valFont  = New-Object System.Drawing.Font('Segoe UI', $valSize, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
-    $iconMode = ($script:Settings.DisplayMode -eq 'icon')
-    $iconW = [Math]::Max(22, [int]($barH * 0.62))
-    $iconH = [Math]::Max(12, [int]($barH * 0.38))
+    $displayMode = [string]$script:Settings.DisplayMode
+    $iconMode = ($displayMode -eq 'icon' -or $displayMode -eq 'iconNumber')
+    $iconHasNumber = ($displayMode -eq 'iconNumber')
+    $iconW = if ($iconHasNumber) { [Math]::Max(34, [int]($barH * 0.88)) } else { [Math]::Max(22, [int]($barH * 0.62)) }
+    $iconH = if ($iconHasNumber) { [Math]::Max(17, [int]($barH * 0.48)) } else { [Math]::Max(12, [int]($barH * 0.38)) }
 
     # 모든 컨트롤을 바 전체 높이로 만들고 간격을 패딩으로 흡수해
     # 바 영역에 클릭이 통과하는 빈틈이 없게 한다.
@@ -581,7 +609,7 @@ function Build-Labels {
                 $pb.Size = New-Object System.Drawing.Size($iconW, $barH)
                 $pb.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::CenterImage
                 $pb.BackColor = $HitBack
-                $pb.Image = New-BatteryImage -Percent $item.Percent -Pal $pal -W $iconW -H $iconH
+                $pb.Image = New-BatteryImage -Percent $item.Percent -Pal $pal -W $iconW -H $iconH -ShowPercent:$iconHasNumber
                 $pb.Location = New-Object System.Drawing.Point($x, 0)
                 $form.Controls.Add($pb)
                 $x += $pb.Width
@@ -734,39 +762,47 @@ function Show-SettingsDialog {
         $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
         $dlg.BackColor = $script:UI.Base3
         $dlg.ForeColor = $script:UI.Base01
-        $dlg.ClientSize = New-Object System.Drawing.Size((S 400), (S 596))
+        $dlg.ClientSize = New-Object System.Drawing.Size((S 420), (S 634))
 
         # --- 카드 1: 표시 방식 ---
         $gb1 = New-Object System.Windows.Forms.GroupBox
         $gb1.Text = '표시 방식'
         $gb1.ForeColor = $script:UI.Base02
         $gb1.Location = New-Object System.Drawing.Point((S 14), (S 12))
-        $gb1.Size = New-Object System.Drawing.Size((S 372), (S 82))
+        $gb1.Size = New-Object System.Drawing.Size((S 392), (S 108))
 
         $rbNum = New-Object System.Windows.Forms.RadioButton
         $rbNum.Text = '숫자로 표시  (예: 85%)'
         $rbNum.ForeColor = $script:UI.Base01
         $rbNum.Location = New-Object System.Drawing.Point((S 14), (S 24))
-        $rbNum.Size = New-Object System.Drawing.Size((S 340), (S 24))
-        $rbNum.Checked = ($script:Settings.DisplayMode -ne 'icon')
+        $rbNum.Size = New-Object System.Drawing.Size((S 360), (S 24))
+        $rbNum.Checked = ($script:Settings.DisplayMode -eq 'number')
 
         $rbIcon = New-Object System.Windows.Forms.RadioButton
         $rbIcon.Text = '배터리 모양 아이콘으로 표시'
         $rbIcon.ForeColor = $script:UI.Base01
         $rbIcon.Location = New-Object System.Drawing.Point((S 14), (S 50))
-        $rbIcon.Size = New-Object System.Drawing.Size((S 340), (S 24))
+        $rbIcon.Size = New-Object System.Drawing.Size((S 360), (S 24))
         $rbIcon.Checked = ($script:Settings.DisplayMode -eq 'icon')
+
+        $rbIconNum = New-Object System.Windows.Forms.RadioButton
+        $rbIconNum.Text = '배터리 아이콘 안에 숫자로 표시'
+        $rbIconNum.ForeColor = $script:UI.Base01
+        $rbIconNum.Location = New-Object System.Drawing.Point((S 14), (S 76))
+        $rbIconNum.Size = New-Object System.Drawing.Size((S 360), (S 24))
+        $rbIconNum.Checked = ($script:Settings.DisplayMode -eq 'iconNumber')
 
         $gb1.Controls.Add($rbNum)
         $gb1.Controls.Add($rbIcon)
+        $gb1.Controls.Add($rbIconNum)
         $dlg.Controls.Add($gb1)
 
         # --- 카드 2: 색상 ---
         $gb2 = New-Object System.Windows.Forms.GroupBox
         $gb2.Text = '색상'
         $gb2.ForeColor = $script:UI.Base02
-        $gb2.Location = New-Object System.Drawing.Point((S 14), (S 102))
-        $gb2.Size = New-Object System.Drawing.Size((S 372), (S 118))
+        $gb2.Location = New-Object System.Drawing.Point((S 14), (S 128))
+        $gb2.Size = New-Object System.Drawing.Size((S 392), (S 118))
 
         $rbColor = New-Object System.Windows.Forms.RadioButton
         $rbColor.Text = '컬러  (20% 이하 노랑, 10% 이하 빨강)'
@@ -814,8 +850,8 @@ function Show-SettingsDialog {
         $chkConn = New-Object System.Windows.Forms.CheckBox
         $chkConn.Text = '현재 연결된 장치만 표시'
         $chkConn.ForeColor = $script:UI.Base01
-        $chkConn.Location = New-Object System.Drawing.Point((S 28), (S 226))
-        $chkConn.Size = New-Object System.Drawing.Size((S 340), (S 24))
+        $chkConn.Location = New-Object System.Drawing.Point((S 28), (S 252))
+        $chkConn.Size = New-Object System.Drawing.Size((S 360), (S 24))
         $chkConn.Checked = [bool]$script:Settings.ConnectedOnly
         $dlg.Controls.Add($chkConn)
 
@@ -823,12 +859,12 @@ function Show-SettingsDialog {
         $gb3 = New-Object System.Windows.Forms.GroupBox
         $gb3.Text = '장치 표시 설정  (표시 이름을 비우면 자동 약칭)'
         $gb3.ForeColor = $script:UI.Base02
-        $gb3.Location = New-Object System.Drawing.Point((S 14), (S 256))
-        $gb3.Size = New-Object System.Drawing.Size((S 372), (S 278))
+        $gb3.Location = New-Object System.Drawing.Point((S 14), (S 282))
+        $gb3.Size = New-Object System.Drawing.Size((S 392), (S 306))
 
         $grid = New-Object System.Windows.Forms.DataGridView
         $grid.Location = New-Object System.Drawing.Point((S 12), (S 24))
-        $grid.Size = New-Object System.Drawing.Size((S 348), (S 240))
+        $grid.Size = New-Object System.Drawing.Size((S 368), (S 268))
         $grid.AllowUserToAddRows = $false
         $grid.AllowUserToDeleteRows = $false
         $grid.AllowUserToResizeRows = $false
@@ -837,6 +873,8 @@ function Show-SettingsDialog {
         $grid.SelectionMode = [System.Windows.Forms.DataGridViewSelectionMode]::CellSelect
         $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
         $grid.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::DisableResizing
+        $grid.ColumnHeadersHeight = (S 30)
+        $grid.RowTemplate.Height = (S 28)
         $grid.BackgroundColor = $script:UI.Base3
         $grid.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
         $grid.GridColor = $script:UI.Base2
@@ -845,24 +883,83 @@ function Show-SettingsDialog {
         $grid.ColumnHeadersDefaultCellStyle.ForeColor = $script:UI.Base02
         $grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = $script:UI.Base2
         $grid.ColumnHeadersDefaultCellStyle.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+        $grid.ColumnHeadersDefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleCenter
+        $grid.ColumnHeadersDefaultCellStyle.WrapMode = [System.Windows.Forms.DataGridViewTriState]::False
         $grid.DefaultCellStyle.BackColor = $script:UI.Base3
         $grid.DefaultCellStyle.ForeColor = $script:UI.Base01
         $grid.DefaultCellStyle.SelectionBackColor = $script:UI.Sel
         $grid.DefaultCellStyle.SelectionForeColor = $script:UI.Base02
+        $grid.DefaultCellStyle.Padding = New-Object System.Windows.Forms.Padding(4, 0, 4, 0)
+        $grid.EditMode = [System.Windows.Forms.DataGridViewEditMode]::EditOnEnter
 
         $colShow = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
         $colShow.HeaderText = '표시'
-        $colShow.FillWeight = 16
+        $colShow.Width = (S 58)
+        $colShow.AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::None
+        $colShow.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
         $colName = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
         $colName.HeaderText = '장치 이름'
         $colName.ReadOnly = $true
-        $colName.FillWeight = 44
+        $colName.FillWeight = 52
         $colAlias = New-Object System.Windows.Forms.DataGridViewTextBoxColumn
         $colAlias.HeaderText = '표시 이름'
-        $colAlias.FillWeight = 40
+        $colAlias.FillWeight = 42
         [void]$grid.Columns.Add($colShow)
         [void]$grid.Columns.Add($colName)
         [void]$grid.Columns.Add($colAlias)
+        $grid.Columns[0].DefaultCellStyle.Alignment = [System.Windows.Forms.DataGridViewContentAlignment]::MiddleCenter
+
+        $grid.add_CurrentCellDirtyStateChanged({
+            if ($grid.IsCurrentCellDirty) {
+                [void]$grid.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit)
+            }
+        })
+        $grid.add_CellPainting({
+            param($s, $e)
+            if ($e.RowIndex -lt 0 -or $e.ColumnIndex -ne 0) { return }
+            $back = if (($e.State -band [System.Windows.Forms.DataGridViewElementStates]::Selected) -ne 0) { $script:UI.Sel } else { $script:UI.Base3 }
+            $bg = New-Object System.Drawing.SolidBrush($back)
+            $border = New-Object System.Drawing.Pen($script:UI.Base2)
+            $e.Graphics.FillRectangle($bg, $e.CellBounds)
+            $e.Graphics.DrawLine($border, $e.CellBounds.Right - 1, $e.CellBounds.Top, $e.CellBounds.Right - 1, $e.CellBounds.Bottom)
+            $e.Graphics.DrawLine($border, $e.CellBounds.Left, $e.CellBounds.Bottom - 1, $e.CellBounds.Right, $e.CellBounds.Bottom - 1)
+
+            $boxSize = [Math]::Min((S 16), $e.CellBounds.Height - (S 8))
+            $boxX = $e.CellBounds.Left + [int](($e.CellBounds.Width - $boxSize) / 2)
+            $boxY = $e.CellBounds.Top + [int](($e.CellBounds.Height - $boxSize) / 2)
+            $boxRect = New-Object System.Drawing.Rectangle($boxX, $boxY, $boxSize, $boxSize)
+            $checked = $false
+            try { $checked = [System.Convert]::ToBoolean($e.Value) } catch { }
+
+            $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+            $r = (S 4)
+            $path.AddArc($boxRect.Left, $boxRect.Top, $r, $r, 180, 90)
+            $path.AddArc($boxRect.Right - $r, $boxRect.Top, $r, $r, 270, 90)
+            $path.AddArc($boxRect.Right - $r, $boxRect.Bottom - $r, $r, $r, 0, 90)
+            $path.AddArc($boxRect.Left, $boxRect.Bottom - $r, $r, $r, 90, 90)
+            $path.CloseFigure()
+            if ($checked) {
+                $fill = New-Object System.Drawing.SolidBrush($script:UI.Blue)
+                $e.Graphics.FillPath($fill, $path)
+                $fill.Dispose()
+                $tick = New-Object System.Drawing.Pen([System.Drawing.Color]::White, (S 2))
+                $tick.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+                $tick.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+                $p1 = New-Object System.Drawing.Point([int]($boxX + $boxSize * 0.25), [int]($boxY + $boxSize * 0.52))
+                $p2 = New-Object System.Drawing.Point([int]($boxX + $boxSize * 0.43), [int]($boxY + $boxSize * 0.70))
+                $p3 = New-Object System.Drawing.Point([int]($boxX + $boxSize * 0.76), [int]($boxY + $boxSize * 0.31))
+                $e.Graphics.DrawLines($tick, @($p1, $p2, $p3))
+                $tick.Dispose()
+            } else {
+                $empty = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
+                $outline = New-Object System.Drawing.Pen($script:UI.Base1, 1)
+                $e.Graphics.FillPath($empty, $path)
+                $e.Graphics.DrawPath($outline, $path)
+                $empty.Dispose(); $outline.Dispose()
+            }
+            $path.Dispose(); $border.Dispose(); $bg.Dispose()
+            $e.Handled = $true
+        })
 
         # 알려진 장치: 현재 감지 + 숨김 목록 + 별칭 보유 장치
         $names = New-Object 'System.Collections.Generic.List[string]'
@@ -880,9 +977,9 @@ function Show-SettingsDialog {
         $dlg.Controls.Add($gb3)
 
         # --- 버튼 ---
-        $btnOk = New-BsButton -Text '확인' -Primary $true -X (S 216) -Y (S 548) -W (S 80) -H (S 32)
+        $btnOk = New-BsButton -Text '확인' -Primary $true -X (S 236) -Y (S 600) -W (S 80) -H (S 32)
         $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
-        $btnCancel = New-BsButton -Text '취소' -Primary $false -X (S 306) -Y (S 548) -W (S 80) -H (S 32)
+        $btnCancel = New-BsButton -Text '취소' -Primary $false -X (S 326) -Y (S 600) -W (S 80) -H (S 32)
         $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
         $dlg.Controls.Add($btnOk)
         $dlg.Controls.Add($btnCancel)
@@ -891,7 +988,13 @@ function Show-SettingsDialog {
 
         if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             try { [void]$grid.EndEdit() } catch { }
-            $script:Settings.DisplayMode = if ($rbIcon.Checked) { 'icon' } else { 'number' }
+            if ($rbIconNum.Checked) {
+                $script:Settings.DisplayMode = 'iconNumber'
+            } elseif ($rbIcon.Checked) {
+                $script:Settings.DisplayMode = 'icon'
+            } else {
+                $script:Settings.DisplayMode = 'number'
+            }
             $script:Settings.IconColorMode = if ($rbGray.Checked) { 'gray' } else { 'color' }
             $script:Settings.NormalColor = '#{0:X2}{1:X2}{2:X2}' -f $btnColor.BackColor.R, $btnColor.BackColor.G, $btnColor.BackColor.B
             $script:Settings.ConnectedOnly = $chkConn.Checked
@@ -1054,17 +1157,22 @@ if ($Test) {
     foreach ($p in 8, 15, 35, 75, 100) {
         foreach ($mode in 'dark', 'light') {
             $pal = if ($mode -eq 'dark') { $palDark } else { $palLight }
-            $img = New-BatteryImage -Percent $p -Pal $pal -W 36 -H 22
-            $big = New-Object System.Drawing.Bitmap(108, 66)
-            $gb = [System.Drawing.Graphics]::FromImage($big)
-            if ($mode -eq 'dark') { $gb.Clear([System.Drawing.Color]::FromArgb(38, 38, 38)) } else { $gb.Clear([System.Drawing.Color]::FromArgb(232, 232, 232)) }
-            $gb.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
-            $gb.DrawImage($img, 0, 0, 108, 66)
-            $gb.Dispose()
-            $path = Join-Path $outDir ('battery_{0}_{1}.png' -f $p, $mode)
-            $big.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
-            $big.Dispose(); $img.Dispose()
-            Write-Output $path
+            foreach ($style in 'plain', 'number') {
+                $showNumber = ($style -eq 'number')
+                $imgW = if ($showNumber) { 44 } else { 36 }
+                $imgH = if ($showNumber) { 24 } else { 22 }
+                $img = New-BatteryImage -Percent $p -Pal $pal -W $imgW -H $imgH -ShowPercent:$showNumber
+                $big = New-Object System.Drawing.Bitmap(($imgW * 3), ($imgH * 3))
+                $gb = [System.Drawing.Graphics]::FromImage($big)
+                if ($mode -eq 'dark') { $gb.Clear([System.Drawing.Color]::FromArgb(38, 38, 38)) } else { $gb.Clear([System.Drawing.Color]::FromArgb(232, 232, 232)) }
+                $gb.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
+                $gb.DrawImage($img, 0, 0, ($imgW * 3), ($imgH * 3))
+                $gb.Dispose()
+                $path = Join-Path $outDir ('battery_{0}_{1}_{2}.png' -f $p, $mode, $style)
+                $big.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+                $big.Dispose(); $img.Dispose()
+                Write-Output $path
+            }
         }
     }
     exit 0
