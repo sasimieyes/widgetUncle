@@ -90,6 +90,7 @@ $script:Settings = @{
     IconColorMode  = 'color'     # 'color' | 'gray'
     NormalColor    = '#4CAF50'   # 컬러 모드의 정상 잔량 색 (기본 녹색)
     WarnColor      = '#FFCD3C'   # 컬러 모드의 20% 이하 경고 색
+    CritColor      = '#FF5252'   # 컬러 모드의 10% 이하 위험 색
     IconTextColor  = '#FFFFFF'   # 배터리 아이콘 안 숫자 색 (게이지 위)
     InvertIconText = $true       # 게이지/빈 영역 경계에서 숫자 색 반전
 }
@@ -113,6 +114,7 @@ function Read-Settings {
         if ($j.IconColorMode -eq 'color' -or $j.IconColorMode -eq 'gray') { $script:Settings.IconColorMode = [string]$j.IconColorMode }
         if ($j.NormalColor -match '^#[0-9A-Fa-f]{6}$') { $script:Settings.NormalColor = [string]$j.NormalColor }
         if ($j.WarnColor -match '^#[0-9A-Fa-f]{6}$') { $script:Settings.WarnColor = [string]$j.WarnColor }
+        if ($j.CritColor -match '^#[0-9A-Fa-f]{6}$') { $script:Settings.CritColor = [string]$j.CritColor }
         if ($j.IconTextColor -match '^#[0-9A-Fa-f]{6}$') { $script:Settings.IconTextColor = [string]$j.IconTextColor }
         if ($null -ne $j.InvertIconText) { $script:Settings.InvertIconText = [bool]$j.InvertIconText }
     } catch { }
@@ -130,6 +132,7 @@ function Save-Settings {
             IconColorMode  = $script:Settings.IconColorMode
             NormalColor    = $script:Settings.NormalColor
             WarnColor      = $script:Settings.WarnColor
+            CritColor      = $script:Settings.CritColor
             IconTextColor  = $script:Settings.IconTextColor
             InvertIconText = $script:Settings.InvertIconText
         }
@@ -282,17 +285,22 @@ function ConvertTo-ColorSafe {
 }
 
 # 잔량 → 상태색
-#  컬러 모드     : 정상=사용자 지정색(기본 녹색), 20% 이하 경고색, 10% 이하 빨강
-#  그레이스케일  : 테마 단색 (흰/검)
+#  컬러 모드     : 정상=사용자 지정색, 20% 이하 경고색, 10% 이하 위험색
+#  그레이스케일  : 정상=회색, 20% 이하=짙은 회색, 10% 이하=검정
 function Get-LevelColor {
     param([int]$Percent, $Pal)
-    if ($script:Settings.IconColorMode -eq 'gray') { return $Pal.Normal }
-    if ($Percent -le 10) { return $Pal.Crit }
+    if ($script:Settings.IconColorMode -eq 'gray') {
+        if ($Percent -le 10) { return [System.Drawing.Color]::FromArgb(0, 0, 0) }
+        if ($Percent -le 20) { return [System.Drawing.Color]::FromArgb(45, 45, 45) }
+        return [System.Drawing.Color]::FromArgb(150, 150, 150)
+    }
+    if ($Percent -le 10) { return (ConvertTo-ColorSafe $script:Settings.CritColor $Pal.Crit) }
     if ($Percent -le 20) { return (ConvertTo-ColorSafe $script:Settings.WarnColor $Pal.Warn) }
     return (ConvertTo-ColorSafe $script:Settings.NormalColor ([System.Drawing.Color]::FromArgb(76, 175, 80)))
 }
 
 function Get-IconNumberColor {
+    if ($script:Settings.IconColorMode -eq 'gray') { return [System.Drawing.Color]::White }
     return (ConvertTo-ColorSafe $script:Settings.IconTextColor ([System.Drawing.Color]::White))
 }
 
@@ -812,7 +820,7 @@ function Show-SettingsDialog {
         $dlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
         $dlg.BackColor = $script:UI.Base3
         $dlg.ForeColor = $script:UI.Base01
-        $dlg.ClientSize = New-Object System.Drawing.Size((S 420), (S 718))
+        $dlg.ClientSize = New-Object System.Drawing.Size((S 420), (S 752))
 
         # --- 카드 1: 표시 방식 ---
         $gb1 = New-Object System.Windows.Forms.GroupBox
@@ -852,10 +860,10 @@ function Show-SettingsDialog {
         $gb2.Text = '색상'
         $gb2.ForeColor = $script:UI.Base02
         $gb2.Location = New-Object System.Drawing.Point((S 14), (S 128))
-        $gb2.Size = New-Object System.Drawing.Size((S 392), (S 202))
+        $gb2.Size = New-Object System.Drawing.Size((S 392), (S 236))
 
         $rbColor = New-Object System.Windows.Forms.RadioButton
-        $rbColor.Text = '컬러  (20% 이하 경고색, 10% 이하 빨강)'
+        $rbColor.Text = '컬러  (20% 이하 경고색, 10% 이하 위험색)'
         $rbColor.ForeColor = $script:UI.Base01
         $rbColor.Location = New-Object System.Drawing.Point((S 14), (S 24))
         $rbColor.Size = New-Object System.Drawing.Size((S 340), (S 24))
@@ -884,18 +892,26 @@ function Show-SettingsDialog {
 
         $btnWarn = New-ColorButton -Color (ConvertTo-ColorSafe $script:Settings.WarnColor ([System.Drawing.Color]::FromArgb(255, 205, 60))) -X (S 160) -Y (S 113)
 
+        $lbCrit = New-Object System.Windows.Forms.Label
+        $lbCrit.Text = '위험 색상 (10% 이하):'
+        $lbCrit.ForeColor = $script:UI.Base01
+        $lbCrit.AutoSize = $true
+        $lbCrit.Location = New-Object System.Drawing.Point((S 16), (S 152))
+
+        $btnCrit = New-ColorButton -Color (ConvertTo-ColorSafe $script:Settings.CritColor ([System.Drawing.Color]::FromArgb(255, 82, 82))) -X (S 160) -Y (S 147)
+
         $lbText = New-Object System.Windows.Forms.Label
         $lbText.Text = '아이콘 숫자 색상:'
         $lbText.ForeColor = $script:UI.Base01
         $lbText.AutoSize = $true
-        $lbText.Location = New-Object System.Drawing.Point((S 16), (S 152))
+        $lbText.Location = New-Object System.Drawing.Point((S 16), (S 186))
 
-        $btnText = New-ColorButton -Color (Get-IconNumberColor) -X (S 160) -Y (S 147)
+        $btnText = New-ColorButton -Color (ConvertTo-ColorSafe $script:Settings.IconTextColor ([System.Drawing.Color]::White)) -X (S 160) -Y (S 181)
 
         $chkInvertText = New-Object System.Windows.Forms.CheckBox
         $chkInvertText.Text = '게이지 경계에서 숫자 색상 반전'
         $chkInvertText.ForeColor = $script:UI.Base01
-        $chkInvertText.Location = New-Object System.Drawing.Point((S 238), (S 148))
+        $chkInvertText.Location = New-Object System.Drawing.Point((S 238), (S 182))
         $chkInvertText.Size = New-Object System.Drawing.Size((S 142), (S 42))
         $chkInvertText.Checked = [bool]$script:Settings.InvertIconText
 
@@ -905,16 +921,28 @@ function Show-SettingsDialog {
         $gb2.Controls.Add($btnColor)
         $gb2.Controls.Add($lbWarn)
         $gb2.Controls.Add($btnWarn)
+        $gb2.Controls.Add($lbCrit)
+        $gb2.Controls.Add($btnCrit)
         $gb2.Controls.Add($lbText)
         $gb2.Controls.Add($btnText)
         $gb2.Controls.Add($chkInvertText)
         $dlg.Controls.Add($gb2)
 
+        $syncColorOptions = {
+            $enabled = $rbColor.Checked
+            foreach ($c in @($lbColor, $btnColor, $lbWarn, $btnWarn, $lbCrit, $btnCrit, $lbText, $btnText, $chkInvertText)) {
+                $c.Enabled = $enabled
+            }
+        }
+        $rbColor.add_CheckedChanged($syncColorOptions)
+        $rbGray.add_CheckedChanged($syncColorOptions)
+        & $syncColorOptions
+
         # --- 연결된 장치만 표시 ---
         $chkConn = New-Object System.Windows.Forms.CheckBox
         $chkConn.Text = '현재 연결된 장치만 표시'
         $chkConn.ForeColor = $script:UI.Base01
-        $chkConn.Location = New-Object System.Drawing.Point((S 28), (S 336))
+        $chkConn.Location = New-Object System.Drawing.Point((S 28), (S 370))
         $chkConn.Size = New-Object System.Drawing.Size((S 360), (S 24))
         $chkConn.Checked = [bool]$script:Settings.ConnectedOnly
         $dlg.Controls.Add($chkConn)
@@ -923,7 +951,7 @@ function Show-SettingsDialog {
         $gb3 = New-Object System.Windows.Forms.GroupBox
         $gb3.Text = '장치 표시 설정  (표시 이름을 비우면 자동 약칭)'
         $gb3.ForeColor = $script:UI.Base02
-        $gb3.Location = New-Object System.Drawing.Point((S 14), (S 366))
+        $gb3.Location = New-Object System.Drawing.Point((S 14), (S 400))
         $gb3.Size = New-Object System.Drawing.Size((S 392), (S 306))
 
         $grid = New-Object System.Windows.Forms.DataGridView
@@ -1041,9 +1069,9 @@ function Show-SettingsDialog {
         $dlg.Controls.Add($gb3)
 
         # --- 버튼 ---
-        $btnOk = New-BsButton -Text '확인' -Primary $true -X (S 236) -Y (S 684) -W (S 80) -H (S 32)
+        $btnOk = New-BsButton -Text '확인' -Primary $true -X (S 236) -Y (S 718) -W (S 80) -H (S 32)
         $btnOk.DialogResult = [System.Windows.Forms.DialogResult]::OK
-        $btnCancel = New-BsButton -Text '취소' -Primary $false -X (S 326) -Y (S 684) -W (S 80) -H (S 32)
+        $btnCancel = New-BsButton -Text '취소' -Primary $false -X (S 326) -Y (S 718) -W (S 80) -H (S 32)
         $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
         $dlg.Controls.Add($btnOk)
         $dlg.Controls.Add($btnCancel)
@@ -1062,6 +1090,7 @@ function Show-SettingsDialog {
             $script:Settings.IconColorMode = if ($rbGray.Checked) { 'gray' } else { 'color' }
             $script:Settings.NormalColor = '#{0:X2}{1:X2}{2:X2}' -f $btnColor.BackColor.R, $btnColor.BackColor.G, $btnColor.BackColor.B
             $script:Settings.WarnColor = '#{0:X2}{1:X2}{2:X2}' -f $btnWarn.BackColor.R, $btnWarn.BackColor.G, $btnWarn.BackColor.B
+            $script:Settings.CritColor = '#{0:X2}{1:X2}{2:X2}' -f $btnCrit.BackColor.R, $btnCrit.BackColor.G, $btnCrit.BackColor.B
             $script:Settings.IconTextColor = '#{0:X2}{1:X2}{2:X2}' -f $btnText.BackColor.R, $btnText.BackColor.G, $btnText.BackColor.B
             $script:Settings.InvertIconText = $chkInvertText.Checked
             $script:Settings.ConnectedOnly = $chkConn.Checked
@@ -1193,8 +1222,8 @@ function New-BarForm {
 if ($Test) {
     Write-Output '=== 블루투스 배터리 조회 테스트 (바 버전) ==='
     Read-Settings
-    Write-Output ('설정: ConnectedOnly={0}, DisplayMode={1}, IconColorMode={2}, NormalColor={3}, WarnColor={4}, IconTextColor={5}, InvertIconText={6}' -f `
-        $script:Settings.ConnectedOnly, $script:Settings.DisplayMode, $script:Settings.IconColorMode, $script:Settings.NormalColor, $script:Settings.WarnColor, $script:Settings.IconTextColor, $script:Settings.InvertIconText)
+    Write-Output ('설정: ConnectedOnly={0}, DisplayMode={1}, IconColorMode={2}, NormalColor={3}, WarnColor={4}, CritColor={5}, IconTextColor={6}, InvertIconText={7}' -f `
+        $script:Settings.ConnectedOnly, $script:Settings.DisplayMode, $script:Settings.IconColorMode, $script:Settings.NormalColor, $script:Settings.WarnColor, $script:Settings.CritColor, $script:Settings.IconTextColor, $script:Settings.InvertIconText)
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $list = Get-BtBatteryList
     $sw.Stop()
@@ -1251,8 +1280,8 @@ if ($SettingsTest) {
     $script:LastAll = Get-BtBatteryList
     $script:Menu = New-Object System.Windows.Forms.ContextMenuStrip   # Add-DragHandlers 참조용
     Show-SettingsDialog
-    Write-Output ('저장된 설정: DisplayMode={0}, IconColorMode={1}, NormalColor={2}, WarnColor={3}, IconTextColor={4}, InvertIconText={5}, ConnectedOnly={6}' -f `
-        $script:Settings.DisplayMode, $script:Settings.IconColorMode, $script:Settings.NormalColor, $script:Settings.WarnColor, $script:Settings.IconTextColor, $script:Settings.InvertIconText, $script:Settings.ConnectedOnly)
+    Write-Output ('저장된 설정: DisplayMode={0}, IconColorMode={1}, NormalColor={2}, WarnColor={3}, CritColor={4}, IconTextColor={5}, InvertIconText={6}, ConnectedOnly={7}' -f `
+        $script:Settings.DisplayMode, $script:Settings.IconColorMode, $script:Settings.NormalColor, $script:Settings.WarnColor, $script:Settings.CritColor, $script:Settings.IconTextColor, $script:Settings.InvertIconText, $script:Settings.ConnectedOnly)
     Write-Output ('Hidden=[{0}] / Aliases: {1}' -f (@($script:Settings.HiddenDevices) -join ', '), (($script:Settings.Aliases.Keys | ForEach-Object { '{0}->{1}' -f $_, $script:Settings.Aliases[$_] }) -join ', '))
     exit 0
 }
