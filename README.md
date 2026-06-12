@@ -88,6 +88,14 @@ CIM(`Win32_PnPEntity.GetDeviceProperties`) 한 번의 호출로 함께 조회합
 
 ## 설정 파일 (settings_bar.json)
 
+`settings_bar.json` 은 **사용자별 로컬 설정**이라 git 에 올리지 않습니다(`.gitignore` 처리).
+저장소에는 기본값 템플릿 `settings_bar.example.json` 만 들어 있습니다.
+
+- 파일이 없으면 위젯이 **내장 기본값**으로 동작하고, 설정을 바꾸면 `settings_bar.json` 이
+  자동 생성됩니다. 따로 만들 필요 없습니다.
+- 손으로 미리 설정하고 싶으면 `settings_bar.example.json` 을 `settings_bar.json` 으로
+  복사해서 값을 고치면 됩니다.
+
 | 항목 | 기본값 | 설명 |
 |---|---|---|
 | RefreshSec | 60 | 새로고침 주기(초) |
@@ -111,5 +119,6 @@ CIM(`Win32_PnPEntity.GetDeviceProperties`) 한 번의 호출로 함께 조회합
 | `start_bar.vbs` | 바 버전 런처 (무창 실행) |
 | `BtBatteryWidget.ps1` | 트레이 버전 본체 |
 | `start_widget.vbs` | 트레이 버전 런처 |
-| `settings_bar.json` / `settings.json` | 설정 (자동 생성) |
+| `settings_bar.example.json` | 설정 기본값 템플릿 (git 추적) |
+| `settings_bar.json` / `settings.json` | 실제 설정 (자동 생성, git 미추적) |
 | `widget.log` | 오류 기록 |

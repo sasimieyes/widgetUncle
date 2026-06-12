@@ -1,0 +1,14 @@
+{
+    "RefreshSec": 60,
+    "BarOffsetRight": 0,
+    "DisplayMode": "icon",
+    "HiddenDevices": [],
+    "ConnectedOnly": true,
+    "Aliases": {},
+    "IconColorMode": "color",
+    "NormalColor": "#4CAF50",
+    "WarnColor": "#FFCD3C",
+    "CritColor": "#FF5252",
+    "IconTextColor": "#FFFFFF",
+    "InvertIconText": true
+}
