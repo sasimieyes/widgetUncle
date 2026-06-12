@@ -369,7 +369,8 @@ function New-BatteryImage {
             $fmt = New-Object System.Drawing.StringFormat
             $fmt.Alignment = [System.Drawing.StringAlignment]::Center
             $fmt.LineAlignment = [System.Drawing.StringAlignment]::Center
-            $textRect = New-Object System.Drawing.RectangleF([float]$bx, [float]($by - 0.5), [float]$bw, [float]$bh)
+            $textYOffset = [Math]::Max(1.0, [Math]::Round($H * 0.06, 1))
+            $textRect = New-Object System.Drawing.RectangleF([float]$bx, [float]($by + $textYOffset), [float]$bw, [float]$bh)
             $g.DrawString([string]$Percent, $font, $textBrush, $textRect, $fmt)
             $fmt.Dispose(); $textBrush.Dispose(); $font.Dispose()
         }
