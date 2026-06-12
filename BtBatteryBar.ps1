@@ -336,7 +336,8 @@ function New-BatteryImage {
         if ($Percent -gt 0 -and $fillW -lt [Math]::Min(2.0, $iw)) { $fillW = [Math]::Min(2.0, $iw) }
         if ($fillW -gt 0) {
             $fillBrush = New-Object System.Drawing.SolidBrush($levelColor)
-            $fr = [Math]::Max(1.0, $ih / 2)
+            $fr = [Math]::Max(1.0, $radius - (($innerGap + ($penW / 2)) / 2))
+            if ($fr -gt ($ih / 2)) { $fr = $ih / 2 }
             $fd = $fr * 2
             $fx = $ix
             $fy = $iy
