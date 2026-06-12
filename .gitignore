@@ -1,1 +1,11 @@
+# 로그
 *.log
+
+# 런타임 설정 (사용자별 로컬 상태)
+# 없으면 내장 기본값으로 동작하고, 설정 변경 시 자동으로 다시 생성됨
+settings_bar.json
+settings.json
+
+# IDE / 에디터
+.idea/
+.vscode/
