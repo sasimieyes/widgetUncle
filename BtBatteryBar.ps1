@@ -43,11 +43,77 @@ public class BarApi {
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    [DllImport("psapi.dll")] public static extern bool EmptyWorkingSet(IntPtr hProcess);
+    [DllImport("kernel32.dll")] public static extern IntPtr GetCurrentProcess();
     public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
 }
 '@
 
 [void][BarApi]::SetProcessDPIAware()
+
+# 진짜 투명 오버레이: 픽셀별 알파(UpdateLayeredWindow)로 작업표시줄 위에 합성.
+#  - WS_EX_LAYERED  : 픽셀 알파 합성 (단색 칠하기 없이 글자/아이콘만 보임)
+#  - WS_EX_NOACTIVATE: 클릭해도 포커스 안 뺏음
+#  - WM_NCHITTEST→HTCLIENT: 완전 투명 픽셀 위에서도 바 사각형 전체가 마우스 입력을 받음
+#    (색상키 투명 방식이 글자 획만 클릭되던 문제를 해결)
+Add-Type -ReferencedAssemblies 'System.Windows.Forms', 'System.Drawing' -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Drawing;
+using System.Windows.Forms;
+
+public class LayeredForm : Form {
+    protected override CreateParams CreateParams {
+        get {
+            CreateParams cp = base.CreateParams;
+            cp.ExStyle |= 0x00080000; // WS_EX_LAYERED
+            cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+            cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW
+            return cp;
+        }
+    }
+    protected override void WndProc(ref Message m) {
+        if (m.Msg == 0x0084) { m.Result = (IntPtr)1; return; } // WM_NCHITTEST -> HTCLIENT
+        base.WndProc(ref m);
+    }
+}
+
+public static class Layered {
+    [StructLayout(LayoutKind.Sequential)] struct POINT { public int x; public int y; public POINT(int a,int b){x=a;y=b;} }
+    [StructLayout(LayoutKind.Sequential)] struct SIZE { public int cx; public int cy; public SIZE(int a,int b){cx=a;cy=b;} }
+    [StructLayout(LayoutKind.Sequential, Pack=1)] struct BLENDFUNCTION { public byte BlendOp; public byte BlendFlags; public byte SourceConstantAlpha; public byte AlphaFormat; }
+    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr hDC);
+    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr hDC, IntPtr hObject);
+    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr hDC);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr hObject);
+    [DllImport("user32.dll")] static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr hdcDst, ref POINT pptDst, ref SIZE psize, IntPtr hdcSrc, ref POINT pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+    public static void Update(IntPtr hwnd, Bitmap bmp, int x, int y) {
+        IntPtr screenDc = GetDC(IntPtr.Zero);
+        IntPtr memDc = CreateCompatibleDC(screenDc);
+        IntPtr hBmp = IntPtr.Zero; IntPtr old = IntPtr.Zero;
+        try {
+            hBmp = bmp.GetHbitmap(Color.FromArgb(0));
+            old = SelectObject(memDc, hBmp);
+            SIZE size = new SIZE(bmp.Width, bmp.Height);
+            POINT src = new POINT(0, 0);
+            POINT dst = new POINT(x, y);
+            BLENDFUNCTION blend = new BLENDFUNCTION();
+            blend.BlendOp = 0;              // AC_SRC_OVER
+            blend.BlendFlags = 0;
+            blend.SourceConstantAlpha = 255;
+            blend.AlphaFormat = 1;          // AC_SRC_ALPHA
+            UpdateLayeredWindow(hwnd, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, 2); // ULW_ALPHA
+        } finally {
+            if (old != IntPtr.Zero) SelectObject(memDc, old);
+            if (hBmp != IntPtr.Zero) DeleteObject(hBmp);
+            DeleteDC(memDc);
+            ReleaseDC(IntPtr.Zero, screenDc);
+        }
+    }
+}
+'@ -ErrorAction Stop
 
 $script:BaseDir      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:SettingsPath = Join-Path $script:BaseDir 'settings_bar.json'
@@ -312,7 +378,8 @@ function New-BatteryImage {
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     try {
         $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        # 투명 배경 위 합성이므로 그레이스케일 AA 사용 (ClearType는 알파에 색 번짐 발생)
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
         $g.Clear([System.Drawing.Color]::Transparent)
 
         $levelColor = Get-LevelColor -Percent $Percent -Pal $Pal
@@ -452,25 +519,26 @@ function Get-AnchorRight {
     return $TrayRect.Right - 10
 }
 
+# 화면 좌표(BarLeft/BarTop)를 계산하고 현재 비트맵을 그 위치에 합성한다.
+# 레이어드 윈도우는 위치도 UpdateLayeredWindow 로 지정하므로 Form.Left/Top 은 쓰지 않는다.
 function Position-Bar {
     $r = Get-TrayRect
     if ($null -ne $r) {
         $tbH = $r.Bottom - $r.Top
-        $barH = [Math]::Max(26, $tbH - 14)
-        if ($script:Form.Height -ne $barH) { $script:Form.Height = $barH }
         $anchor = Get-AnchorRight -TrayRect $r
-        $left = $anchor - [Math]::Max(0, $script:Settings.BarOffsetRight) - $script:Form.Width
+        $left = $anchor - [Math]::Max(0, $script:Settings.BarOffsetRight) - $script:BarW
         if ($left -lt $r.Left) { $left = $r.Left }
-        $script:Form.Top  = $r.Top + [int](($tbH - $barH) / 2)
-        $script:Form.Left = $left
+        $script:BarTop  = $r.Top + [int](($tbH - $script:BarH) / 2)
+        $script:BarLeft = $left
         $script:LastTrayKey = '{0},{1},{2},{3},{4}' -f $r.Left, $r.Top, $r.Right, $r.Bottom, $anchor
     } else {
         # 작업표시줄 창을 찾지 못하면 주 화면 우측 하단에 표시
         $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-        $script:Form.Top  = $wa.Bottom - $script:Form.Height - 6
-        $script:Form.Left = $wa.Right - $script:Form.Width - 8 - [Math]::Max(0, $script:Settings.BarOffsetRight)
+        $script:BarTop  = $wa.Bottom - $script:BarH - 6
+        $script:BarLeft = $wa.Right - $script:BarW - 8 - [Math]::Max(0, $script:Settings.BarOffsetRight)
         $script:LastTrayKey = ''
     }
+    Blit-Bar
 }
 
 function Force-TopMost {
@@ -478,6 +546,12 @@ function Force-TopMost {
         # HWND_TOPMOST(-1), SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE
         [void][BarApi]::SetWindowPos($script:Form.Handle, [IntPtr](-1), 0, 0, 0, 0, 0x0013)
     }
+}
+
+# 유휴 메모리 페이지를 물리 RAM에서 내보내 작업 관리자의 메모리 사용량을 낮춘다.
+# (필요 시 자동으로 다시 페이지인되므로 안전. WinForms/CLR 시작 직후 효과 큼)
+function Trim-WorkingSet {
+    try { [void][BarApi]::EmptyWorkingSet([BarApi]::GetCurrentProcess()) } catch { }
 }
 
 # 클릭해도 포커스를 뺏지 않도록 + Alt-Tab 목록에서 제외
@@ -490,7 +564,8 @@ function Set-BarExStyle {
 
 # 전체화면 앱이 앞에 있으면 바를 숨김 (게임/동영상 방해 방지)
 function Test-FullscreenForeground {
-    $fg = [BarApi]::GetForegroundWindow()
+    param([IntPtr]$Fg = [IntPtr]::Zero)
+    $fg = if ($Fg -ne [IntPtr]::Zero) { $Fg } else { [BarApi]::GetForegroundWindow() }
     if ($fg -eq [IntPtr]::Zero) { return $false }
 
     $procId = [uint32]0
@@ -530,14 +605,14 @@ function Add-DragHandlers {
     $Control.add_MouseDown({
         param($s, $e)
         if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-            $script:DragOffX = [System.Windows.Forms.Control]::MousePosition.X - $script:Form.Left
+            $script:DragOffX = [System.Windows.Forms.Control]::MousePosition.X - $script:BarLeft
         }
     })
     $Control.add_MouseMove({
         param($s, $e)
         if ($script:DragOffX -ge 0 -and $e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-            $newLeft = [System.Windows.Forms.Control]::MousePosition.X - $script:DragOffX
-            $script:Form.Left = [Math]::Max(0, $newLeft)
+            $script:BarLeft = [Math]::Max(0, [System.Windows.Forms.Control]::MousePosition.X - $script:DragOffX)
+            Blit-Bar
         }
     })
     $Control.add_MouseUp({
@@ -547,7 +622,7 @@ function Add-DragHandlers {
             $r = Get-TrayRect
             if ($null -ne $r) {
                 $anchor = Get-AnchorRight -TrayRect $r
-                $script:Settings.BarOffsetRight = [Math]::Max(0, $anchor - ($script:Form.Left + $script:Form.Width))
+                $script:Settings.BarOffsetRight = [Math]::Max(0, $anchor - ($script:BarLeft + $script:BarW))
             }
             Save-Settings
             Position-Bar
@@ -564,32 +639,27 @@ function Add-DragHandlers {
     })
 }
 
-# ------------------------------------------------------------ 라벨/아이콘 구성
-$script:LastAll = @()   # 감지된 전체 장치 (설정창용)
+# ------------------------------------------------------------ 라벨/아이콘 구성 (레이어드 비트맵)
+$script:LastAll    = @()            # 감지된 전체 장치 (설정창용)
+$script:CurrentBmp = $null          # 현재 바 비트맵 (레이어드 윈도우에 합성 중)
+$script:BarLeft    = -3000
+$script:BarTop     = -3000
+$script:BarW       = 120
+$script:BarH       = 34
 
-function Clear-BarControls {
-    foreach ($c in @($script:Form.Controls)) {
-        $script:Form.Controls.Remove($c)
-        if ($c -is [System.Windows.Forms.PictureBox] -and $null -ne $c.Image) {
-            $img = $c.Image; $c.Image = $null; $img.Dispose()
-        }
-        $c.Dispose()
-    }
+# 현재 비트맵을 계산된 화면 좌표에 합성 (재렌더 없이 위치만 갱신할 때도 사용)
+function Blit-Bar {
+    if ($null -eq $script:CurrentBmp) { return }
+    if (-not $script:Form.IsHandleCreated -or $script:Form.IsDisposed) { return }
+    [Layered]::Update($script:Form.Handle, $script:CurrentBmp, $script:BarLeft, $script:BarTop)
 }
 
-function Build-Labels {
-    param($List, [bool]$Light, [System.Drawing.Color]$HitBack)
+# 장치 목록을 32bpp ARGB 비트맵에 그려서 반환 (자식 컨트롤 없음 = 진짜 투명).
+#  반환: @{ Bmp; W; Tip }
+function Render-Bar {
+    param($List, [bool]$Light)
     $pal = Get-Palette -Light $Light
-    $form = $script:Form
-    $form.SuspendLayout()
-    Clear-BarControls
-
-    # 위장 배경: 작업표시줄에서 샘플링한 실제 색으로 전체를 칠한다.
-    # 시각적으로는 투명과 같지만, 바 사각형 전체가 마우스 입력을 받는다.
-    # (TransparencyKey 색상키 방식은 글자 획 픽셀만 클릭이 잡혀 사용 불가)
-    $form.BackColor = $HitBack
-
-    $barH = $form.Height
+    $barH = $script:BarH
     $nameSize = [Math]::Max(9, [int]($barH * 0.34))
     $valSize  = [Math]::Max(10, [int]($barH * 0.40))
     $nameFont = New-Object System.Drawing.Font('Segoe UI', $nameSize, [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
@@ -600,79 +670,77 @@ function Build-Labels {
     $iconW = if ($iconHasNumber) { [Math]::Max(34, [int]($barH * 0.88)) } else { [Math]::Max(22, [int]($barH * 0.62)) }
     $iconH = if ($iconHasNumber) { [Math]::Max(17, [int]($barH * 0.48)) } else { [Math]::Max(12, [int]($barH * 0.38)) }
 
-    # 모든 컨트롤을 바 전체 높이로 만들고 간격을 패딩으로 흡수해
-    # 바 영역에 클릭이 통과하는 빈틈이 없게 한다.
+    # 측정용 scratch graphics
+    $scratch = New-Object System.Drawing.Bitmap(1, 1)
+    $mg = [System.Drawing.Graphics]::FromImage($scratch)
+    $mg.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
+    $sf = [System.Drawing.StringFormat]::GenericTypographic
+    function MeasW { param($t, $f) return [int][Math]::Ceiling($mg.MeasureString($t, $f, [int]100000, $sf).Width) }
+
+    # 1) 레이아웃 측정 (그릴 항목 목록과 총 너비 산출)
+    $ops = New-Object System.Collections.ArrayList
+    $tipLines = New-Object System.Collections.ArrayList
     $x = 0
     if ($List.Count -eq 0) {
         $msg = 'BT 배터리 장치 없음'
         if ($script:LastAll.Count -gt 0) { $msg = '표시할 장치 없음 (우클릭-설정)' }
-        $lb = New-Object System.Windows.Forms.Label
-        $lb.AutoSize = $false
-        $lb.Font = $nameFont
-        $lb.ForeColor = $pal.Name
-        $lb.BackColor = $HitBack
-        $lb.Text = $msg
-        $lb.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-        $lb.Padding = New-Object System.Windows.Forms.Padding(12, 0, 12, 0)
-        $lb.Size = New-Object System.Drawing.Size($lb.PreferredWidth, $barH)
-        $lb.Location = New-Object System.Drawing.Point($x, 0)
-        $form.Controls.Add($lb)
-        Add-DragHandlers -Control $lb
-        $script:Tip.SetToolTip($lb, '우클릭 메뉴의 설정에서 표시할 장치를 선택할 수 있습니다')
-        $x += $lb.Width
+        $w = MeasW $msg $nameFont
+        [void]$ops.Add(@{ K='text'; T=$msg; F=$nameFont; C=$pal.Name; X=($x + 12) })
+        [void]$tipLines.Add('우클릭 메뉴의 설정에서 표시할 장치를 선택할 수 있습니다')
+        $x = $x + 12 + $w + 12
     } else {
         $first = $true
         foreach ($item in $List) {
-            $tipText = '{0}  {1}' -f $item.Name, $item.Detail
             $leftPad = if ($first) { 12 } else { 14 }
             $first = $false
-
-            $lbName = New-Object System.Windows.Forms.Label
-            $lbName.AutoSize = $false
-            $lbName.Font = $nameFont
-            $lbName.ForeColor = $pal.Name
-            $lbName.BackColor = $HitBack
-            $lbName.Text = $item.Short
-            $lbName.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-            $lbName.Padding = New-Object System.Windows.Forms.Padding($leftPad, 0, 4, 0)
-            $lbName.Size = New-Object System.Drawing.Size($lbName.PreferredWidth, $barH)
-            $lbName.Location = New-Object System.Drawing.Point($x, 0)
-            $form.Controls.Add($lbName)
-            $x += $lbName.Width
-            $script:Tip.SetToolTip($lbName, $tipText)
-            Add-DragHandlers -Control $lbName
-
+            $nameX = $x + $leftPad
+            $nameW = MeasW $item.Short $nameFont
+            [void]$ops.Add(@{ K='text'; T=$item.Short; F=$nameFont; C=$pal.Name; X=$nameX })
+            $x = $nameX + $nameW + 4
             if ($iconMode) {
-                $pb = New-Object System.Windows.Forms.PictureBox
-                $pb.Size = New-Object System.Drawing.Size($iconW, $barH)
-                $pb.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::CenterImage
-                $pb.BackColor = $HitBack
-                $pb.Image = New-BatteryImage -Percent $item.Percent -Pal $pal -W $iconW -H $iconH -ShowPercent:$iconHasNumber
-                $pb.Location = New-Object System.Drawing.Point($x, 0)
-                $form.Controls.Add($pb)
-                $x += $pb.Width
-                $script:Tip.SetToolTip($pb, $tipText)
-                Add-DragHandlers -Control $pb
+                [void]$ops.Add(@{ K='icon'; Pct=$item.Percent; X=$x; IW=$iconW; IH=$iconH; ShowPct=$iconHasNumber })
+                $x = $x + $iconW + 14
             } else {
-                $lbVal = New-Object System.Windows.Forms.Label
-                $lbVal.AutoSize = $false
-                $lbVal.Font = $valFont
-                $lbVal.ForeColor = (Get-LevelColor -Percent $item.Percent -Pal $pal)
-                $lbVal.BackColor = $HitBack
-                $lbVal.Text = '{0}%' -f $item.Percent
-                $lbVal.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-                $lbVal.Size = New-Object System.Drawing.Size($lbVal.PreferredWidth, $barH)
-                $lbVal.Location = New-Object System.Drawing.Point($x, 0)
-                $form.Controls.Add($lbVal)
-                $x += $lbVal.Width
-                $script:Tip.SetToolTip($lbVal, $tipText)
-                Add-DragHandlers -Control $lbVal
+                $valText = '{0}%' -f $item.Percent
+                $valW = MeasW $valText $valFont
+                [void]$ops.Add(@{ K='text'; T=$valText; F=$valFont; C=(Get-LevelColor -Percent $item.Percent -Pal $pal); X=$x })
+                $x = $x + $valW + 14
             }
+            [void]$tipLines.Add(('{0}  {1}' -f $item.Name, $item.Detail))
         }
     }
+    $mg.Dispose(); $scratch.Dispose()
+    $totalW = [Math]::Max(8, $x + 12)
 
-    $form.Width = $x + 12   # 오른쪽 여백 (폼 배경도 같은 색이라 히트 영역)
-    $form.ResumeLayout()
+    # 2) 실제 비트맵에 그리기 (투명 배경 위 그레이스케일 안티앨리어싱)
+    $bmp = New-Object System.Drawing.Bitmap($totalW, $barH, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb))
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
+        # 배경을 알파 1(1/255, 약 0.4% — 눈에 안 보임)로 채운다.
+        # 레이어드 윈도우는 알파 0 픽셀의 마우스 입력을 OS가 통과시켜(WM_NCHITTEST 이전)
+        # 글자 획만 클릭되던 문제가 생긴다. 알파 1이면 바 사각형 전체가 입력을 받는다.
+        $g.Clear([System.Drawing.Color]::FromArgb(1, 0, 0, 0))
+        foreach ($op in $ops) {
+            if ($op.K -eq 'text') {
+                $ty = [int](($barH - $op.F.GetHeight($g)) / 2)
+                $brush = New-Object System.Drawing.SolidBrush($op.C)
+                $g.DrawString($op.T, $op.F, $brush, [float]$op.X, [float]$ty, $sf)
+                $brush.Dispose()
+            } else {
+                $img = New-BatteryImage -Percent $op.Pct -Pal $pal -W $op.IW -H $op.IH -ShowPercent:$op.ShowPct
+                $iy = [int](($barH - $op.IH) / 2)
+                $g.DrawImage($img, [int]$op.X, $iy, [int]$op.IW, [int]$op.IH)
+                $img.Dispose()
+            }
+        }
+    } finally {
+        $g.Dispose()
+        $nameFont.Dispose(); $valFont.Dispose()
+    }
+
+    return @{ Bmp = $bmp; W = $totalW; Tip = ($tipLines -join "`r`n") }
 }
 
 # ------------------------------------------------------------ 갱신
@@ -683,31 +751,42 @@ function Update-Bar {
         if ($script:DragOffX -ge 0) { return }
     }
 
-    # 작업표시줄 높이/배경색을 먼저 확정 (라벨이 바 전체 높이를 차지하므로)
+    # 작업표시줄 높이를 먼저 확정 (비트맵 높이로 사용)
     $r = Get-TrayRect
     $barH = 44
     if ($null -ne $r) { $barH = [Math]::Max(26, ($r.Bottom - $r.Top) - 14) }
-    if ($script:Form.Height -ne $barH) { $script:Form.Height = $barH }
+    $script:BarH = $barH
 
+    # 작업표시줄 색을 샘플링해 라이트/다크 판정 (글자 가독성용. 배경은 칠하지 않음)
     $sample = Get-TaskbarSampleColor -TrayRect $r
     $light = Get-TaskbarIsLight
     if ($null -ne $sample) {
         $lum = 0.299 * $sample.R + 0.587 * $sample.G + 0.114 * $sample.B
         $light = ($lum -gt 127)
     }
-    $hit = if ($null -ne $sample) { $sample } else { (Get-Palette -Light $light).Key }
 
     $all = Get-BtBatteryList
     $script:LastAll = $all
     $hidden = @($script:Settings.HiddenDevices)
     $visible = @($all | Where-Object { $hidden -notcontains $_.Name -and ($_.Connected -or -not $script:Settings.ConnectedOnly) })
-    Build-Labels -List $visible -Light $light -HitBack $hit
-    Position-Bar
+
+    $res = Render-Bar -List $visible -Light $light
+    if ($null -ne $script:CurrentBmp) { $script:CurrentBmp.Dispose() }
+    $script:CurrentBmp = $res.Bmp
+    $script:BarW = $res.W
+    $script:Tip.SetToolTip($script:Form, $res.Tip)
+
+    Position-Bar      # 위치 계산 + 비트맵 합성
     Force-TopMost
     Update-Menu
 }
 
 # 1초마다: 전체화면 감지 / 작업표시줄 이동 추적 / 최상위 유지
+# 최적화: 비싼 검사(전체화면 판정 = GetProcessById 등)는 포그라운드 창이
+#   바뀐 순간에만 수행한다. 유휴 상태(같은 창 계속 포커스)에서는 거의 일을 안 한다.
+$script:LastFg    = [IntPtr]::Zero
+$script:TickCount = 0
+
 function Watch-Tick {
     if ($script:Form.IsDisposed) { return }
     if ($script:DragOffX -ge 0) {
@@ -720,28 +799,43 @@ function Watch-Tick {
     }
     if ($script:Menu.Visible) { return }
 
-    $fs = Test-FullscreenForeground
-    if ($fs) {
-        if ($script:Form.Visible) { $script:Form.Visible = $false }
-        return
-    }
-    if (-not $script:Form.Visible) {
-        $script:Form.Visible = $true
-        Position-Bar
-        Force-TopMost
-        return
+    $script:TickCount++
+
+    # 포그라운드 창이 바뀐 순간 = 전체화면 진입/이탈, z-순서 변화가 일어나는 유일한 시점.
+    # 변화가 없으면 전체화면 판정을 건너뛴다 (5틱마다 한 번은 같은 창의 전체화면 토글 대비 재확인).
+    $fg = [BarApi]::GetForegroundWindow()
+    $fgChanged = ($fg -ne $script:LastFg)
+    $script:LastFg = $fg
+
+    if ($fgChanged -or ($script:TickCount % 5) -eq 0) {
+        if (Test-FullscreenForeground -Fg $fg) {
+            if ($script:Form.Visible) { $script:Form.Visible = $false }
+            return
+        }
+        if (-not $script:Form.Visible) {
+            $script:Form.Visible = $true
+            Position-Bar
+        }
+    } elseif (-not $script:Form.Visible) {
+        return   # 전체화면으로 숨긴 상태 유지 (포그라운드 그대로)
     }
 
-    $r = Get-TrayRect
-    $key = ''
-    if ($null -ne $r) {
-        $anchor = Get-AnchorRight -TrayRect $r
-        $key = '{0},{1},{2},{3},{4}' -f $r.Left, $r.Top, $r.Right, $r.Bottom, $anchor
+    # 작업표시줄 이동/리사이즈 추적은 자주 일어나지 않으므로 3틱마다만.
+    if (($script:TickCount % 3) -eq 0) {
+        $r = Get-TrayRect
+        $key = ''
+        if ($null -ne $r) {
+            $anchor = Get-AnchorRight -TrayRect $r
+            $key = '{0},{1},{2},{3},{4}' -f $r.Left, $r.Top, $r.Right, $r.Bottom, $anchor
+        }
+        if ($key -ne $script:LastTrayKey) { Position-Bar }
     }
-    if ($key -ne $script:LastTrayKey) { Position-Bar }
 
-    # 작업표시줄/다른 창 클릭으로 가려지는 것을 즉시 복구
+    # 최상위 유지는 저비용(SetWindowPos)이라 매 틱 수행 → 가려져도 1초 내 복구.
     Force-TopMost
+
+    # 5분마다 유휴 메모리 트림.
+    if (($script:TickCount % 300) -eq 0) { Trim-WorkingSet }
 }
 
 # ------------------------------------------------------------ 설정 창 (Solarized + 부트스트랩 스타일)
@@ -1200,20 +1294,21 @@ function Stop-Bar {
     try { $script:WatchTimer.Stop() } catch { }
     try { $script:OnceTimer.Stop() } catch { }
     try { $script:Form.Visible = $false } catch { }
+    try { if ($null -ne $script:CurrentBmp) { $script:CurrentBmp.Dispose() } } catch { }
     [System.Windows.Forms.Application]::Exit()
 }
 
 # ------------------------------------------------------------ 폼 생성
 function New-BarForm {
-    $f = New-Object System.Windows.Forms.Form
+    # 레이어드(픽셀별 알파) 폼 — 배경 없이 글자/아이콘만 작업표시줄 위에 합성된다.
+    $f = New-Object LayeredForm
     $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
     $f.ShowInTaskbar = $false
     $f.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
     $f.Size = New-Object System.Drawing.Size(120, 34)
-    $f.Location = New-Object System.Drawing.Point(-3000, -3000)   # 화면 밖에서 시작 (깜빡임 방지)
+    $f.Location = New-Object System.Drawing.Point(-3000, -3000)   # 화면 밖에서 시작
     $f.Text = 'BtBatteryBar'
     $f.TopMost = $true
-    $f.BackColor = [System.Drawing.Color]::FromArgb(28, 28, 28)
     Add-DragHandlers -Control $f
     return $f
 }
@@ -1326,6 +1421,9 @@ try {
     $script:WatchTimer.Interval = 1000
     $script:WatchTimer.add_Tick({ Watch-Tick })
     $script:WatchTimer.Start()
+
+    # 시작 직후 CLR/WinForms 로딩에 쓰인 유휴 메모리를 물리 RAM에서 트림
+    Trim-WorkingSet
 
     $ctx = New-Object System.Windows.Forms.ApplicationContext
     [System.Windows.Forms.Application]::Run($ctx)
